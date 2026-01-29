@@ -27,3 +27,4 @@ ffprobe/
 .env*
 *secret*
 *credential*
+*.asc
