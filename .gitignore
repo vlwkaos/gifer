@@ -18,3 +18,12 @@ ffprobe/
 
 # Config files (user-specific)
 # ~/.config/gifer/ is where settings are stored, not in the project
+
+# Security - prevent accidental commits
+*.pem
+*.key
+*.p12
+*.pfx
+.env*
+*secret*
+*credential*
