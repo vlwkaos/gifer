@@ -1,4 +1,5 @@
 # Build artifacts
+knowledge
 /target/
 
 # Cargo.lock is typically committed for binaries, but ignore if you prefer
