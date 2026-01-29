@@ -1,0 +1,34 @@
+[package]
+name = "gifer"
+version = "0.1.0"
+edition = "2021"
+description = "TUI application for converting videos to GIFs"
+
+[dependencies]
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+
+# Clipboard (supports file paths, unlike arboard)
+clipboard-rs = "0.2"
+
+# FFmpeg wrapper with progress events
+ffmpeg-sidecar = "2"
+
+# Config persistence
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "5"
+
+# Error handling
+anyhow = "1"
+
+# UUID for job IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Async channels
+futures = "0.3"

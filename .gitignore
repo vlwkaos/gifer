@@ -1,0 +1,20 @@
+# Build artifacts
+/target/
+
+# Cargo.lock is typically committed for binaries, but ignore if you prefer
+# Cargo.lock
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# FFmpeg sidecar downloads
+ffmpeg/
+ffprobe/
+
+# Config files (user-specific)
+# ~/.config/gifer/ is where settings are stored, not in the project
