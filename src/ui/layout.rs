@@ -134,10 +134,17 @@ impl Widget for HelpBar<'_> {
                 ("(j/k)", " nav  "),
                 ("(q)", "uit"),
             ];
+            let keys_len: usize = help.iter().map(|(k, d)| k.len() + d.len()).sum();
             for (key, desc) in help {
                 spans.push(Span::styled(key, key_style));
                 spans.push(Span::styled(desc, desc_style));
             }
+
+            // Version on the right
+            let version = env!("CARGO_PKG_VERSION");
+            let padding = inner.width.saturating_sub(keys_len as u16 + version.len() as u16 + 3);
+            spans.push(Span::raw(" ".repeat(padding as usize)));
+            spans.push(Span::styled(format!("v{}", version), Style::default().fg(Color::DarkGray)));
         }
 
         let paragraph = Paragraph::new(Line::from(spans));
