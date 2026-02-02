@@ -2,6 +2,81 @@ use std::path::PathBuf;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+/// Input source for a conversion job
+#[derive(Debug, Clone)]
+pub enum InputSource {
+    /// Local file path
+    LocalFile(PathBuf),
+    /// Remote URL (http/https)
+    RemoteUrl(String),
+}
+
+impl InputSource {
+    /// Get display name (filename or URL truncated)
+    pub fn display_name(&self) -> String {
+        match self {
+            InputSource::LocalFile(path) => path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            InputSource::RemoteUrl(url) => {
+                // Extract filename from URL path
+                if let Some(path) = url.split('?').next() {
+                    if let Some(filename) = path.rsplit('/').next() {
+                        if !filename.is_empty() && filename.contains('.') {
+                            return filename.to_string();
+                        }
+                    }
+                }
+                // Fallback: truncate URL
+                if url.len() > 40 {
+                    format!("{}...", &url[..37])
+                } else {
+                    url.clone()
+                }
+            }
+        }
+    }
+
+    /// Get the input argument for FFmpeg
+    pub fn ffmpeg_input(&self) -> String {
+        match self {
+            InputSource::LocalFile(path) => path.to_string_lossy().to_string(),
+            InputSource::RemoteUrl(url) => url.clone(),
+        }
+    }
+
+    /// Extract stem for output filename
+    pub fn file_stem(&self) -> Option<String> {
+        match self {
+            InputSource::LocalFile(path) => {
+                path.file_stem().and_then(|s| s.to_str()).map(String::from)
+            }
+            InputSource::RemoteUrl(url) => {
+                // Extract filename from URL, then stem
+                url.split('?')
+                    .next()
+                    .and_then(|path| path.rsplit('/').next())
+                    .and_then(|filename| filename.rsplit_once('.'))
+                    .map(|(stem, _)| stem.to_string())
+            }
+        }
+    }
+
+    /// Get unique key for duplicate detection
+    pub fn dedup_key(&self) -> String {
+        match self {
+            InputSource::LocalFile(path) => path
+                .canonicalize()
+                .unwrap_or_else(|_| path.clone())
+                .to_string_lossy()
+                .to_string(),
+            InputSource::RemoteUrl(url) => url.clone(),
+        }
+    }
+}
+
 /// Status of a conversion job
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobStatus {
@@ -72,8 +147,8 @@ impl ConversionProgress {
 pub struct ConversionJob {
     /// Unique identifier
     pub id: Uuid,
-    /// Input video file path
-    pub input_path: PathBuf,
+    /// Input source (local file or remote URL)
+    pub input: InputSource,
     /// Output GIF file path
     pub output_path: PathBuf,
     /// Current status
@@ -86,10 +161,10 @@ pub struct ConversionJob {
 
 impl ConversionJob {
     /// Create a new pending conversion job
-    pub fn new(input_path: PathBuf, output_path: PathBuf) -> Self {
+    pub fn new(input: InputSource, output_path: PathBuf) -> Self {
         Self {
             id: Uuid::new_v4(),
-            input_path,
+            input,
             output_path,
             status: JobStatus::Pending,
             progress: ConversionProgress::default(),
@@ -99,11 +174,7 @@ impl ConversionJob {
 
     /// Get the input filename for display
     pub fn input_filename(&self) -> String {
-        self.input_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string()
+        self.input.display_name()
     }
 
     /// Get the output filename for display

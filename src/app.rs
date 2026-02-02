@@ -1,10 +1,11 @@
-use crate::clipboard::{copy_file_to_clipboard, get_videos_from_clipboard};
+use crate::clipboard::{copy_file_to_clipboard, get_url_from_clipboard, get_videos_from_clipboard};
 use crate::config::{expand_tilde, Settings};
-use crate::conversion::{spawn_conversion, ConversionJob, JobStatus, ProgressUpdate};
+use crate::conversion::{spawn_conversion, ConversionJob, InputSource, JobStatus, ProgressUpdate};
 use crate::event::{is_down_key, is_left_key, is_paste_key, is_quit_key, is_right_key, is_up_key};
 use crossterm::event::{KeyCode, KeyEvent};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 /// Which section of the UI is currently focused
@@ -58,8 +59,8 @@ pub struct App {
     pub settings: Settings,
     /// List of conversion jobs
     pub jobs: Vec<ConversionJob>,
-    /// Set of processed file paths for duplicate detection
-    pub processed_paths: HashSet<PathBuf>,
+    /// Set of processed inputs for duplicate detection (canonicalized paths or URLs)
+    pub processed_inputs: HashSet<String>,
     /// Channel sender for progress updates
     pub progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
     /// Channel receiver for progress updates
@@ -76,6 +77,12 @@ pub struct App {
     pub editing_output: bool,
     /// Text buffer for output directory editing
     pub output_input: String,
+    /// Text input mode for renaming output file
+    pub editing_rename: bool,
+    /// Text buffer for rename editing (filename only, no path)
+    pub rename_input: String,
+    /// Scroll offset for horizontal text scrolling in status bar
+    pub scroll_offset: u16,
 }
 
 impl App {
@@ -89,7 +96,7 @@ impl App {
             selected_job_index: 0,
             settings,
             jobs: Vec::new(),
-            processed_paths: HashSet::new(),
+            processed_inputs: HashSet::new(),
             progress_tx,
             progress_rx,
             should_quit: false,
@@ -98,6 +105,9 @@ impl App {
             message_timeout: 0,
             editing_output: false,
             output_input,
+            editing_rename: false,
+            rename_input: String::new(),
+            scroll_offset: 0,
         }
     }
 
@@ -117,6 +127,9 @@ impl App {
             }
         }
 
+        // Increment scroll offset for status bar text animation
+        self.scroll_offset = self.scroll_offset.wrapping_add(1);
+
         // Start pending jobs if we have capacity
         self.start_pending_jobs();
     }
@@ -126,6 +139,12 @@ impl App {
         // If editing output path, handle text input
         if self.editing_output {
             self.handle_output_input(key);
+            return;
+        }
+
+        // If renaming output file, handle text input
+        if self.editing_rename {
+            self.handle_rename_input(key);
             return;
         }
 
@@ -151,6 +170,9 @@ impl App {
             }
             KeyCode::Char('x') => {
                 self.delete_selected_job();
+            }
+            KeyCode::Char('r') => {
+                self.start_rename();
             }
             KeyCode::Enter => {
                 // Enter edit mode for output directory
@@ -191,6 +213,69 @@ impl App {
             }
             KeyCode::Char(c) => {
                 self.output_input.push(c);
+            }
+            _ => {}
+        }
+    }
+
+    fn start_rename(&mut self) {
+        if let Some(job) = self.jobs.get(self.selected_job_index) {
+            // Allow rename for pending and completed jobs
+            if !matches!(job.status, JobStatus::Pending | JobStatus::Complete) {
+                self.set_message("Can only rename pending or completed jobs".to_string(), true);
+                return;
+            }
+
+            // Initialize with current filename (without .gif extension)
+            let stem = job
+                .output_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output");
+            self.rename_input = stem.to_string();
+            self.editing_rename = true;
+        }
+    }
+
+    fn handle_rename_input(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => {
+                // Apply the rename
+                let new_name = self.rename_input.trim();
+                if new_name.is_empty() {
+                    self.set_message("Filename cannot be empty".to_string(), true);
+                    return;
+                }
+
+                if let Some(job) = self.jobs.get_mut(self.selected_job_index) {
+                    let new_path = self.settings.output_dir.join(format!("{}.gif", new_name));
+
+                    // For completed jobs, rename the actual file on disk
+                    if job.status == JobStatus::Complete {
+                        if let Err(e) = std::fs::rename(&job.output_path, &new_path) {
+                            self.set_message(format!("Rename failed: {}", e), true);
+                            self.editing_rename = false;
+                            return;
+                        }
+                    }
+
+                    job.output_path = new_path;
+                }
+
+                self.editing_rename = false;
+                self.set_message("Renamed".to_string(), false);
+            }
+            KeyCode::Esc => {
+                self.editing_rename = false;
+            }
+            KeyCode::Backspace => {
+                self.rename_input.pop();
+            }
+            KeyCode::Char(c) => {
+                // Filter out invalid filename characters
+                if !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                    self.rename_input.push(c);
+                }
             }
             _ => {}
         }
@@ -270,12 +355,14 @@ impl App {
     fn handle_job_list_key(&mut self, key: KeyEvent) {
         if is_down_key(&key) && !self.jobs.is_empty() {
             self.selected_job_index = (self.selected_job_index + 1) % self.jobs.len();
+            self.scroll_offset = 0;
         } else if is_up_key(&key) && !self.jobs.is_empty() {
             self.selected_job_index = if self.selected_job_index == 0 {
                 self.jobs.len() - 1
             } else {
                 self.selected_job_index - 1
             };
+            self.scroll_offset = 0;
         }
     }
 
@@ -321,27 +408,24 @@ impl App {
     }
 
     fn paste_from_clipboard(&mut self) {
+        // Try file paths first (existing behavior)
         match get_videos_from_clipboard() {
             Ok(videos) => {
                 let mut added = 0;
                 let mut skipped = 0;
 
                 for video_path in videos {
-                    // Check for duplicates
-                    let canonical = video_path
-                        .canonicalize()
-                        .unwrap_or_else(|_| video_path.clone());
-                    if self.processed_paths.contains(&canonical) {
+                    let input = InputSource::LocalFile(video_path);
+                    let dedup_key = input.dedup_key();
+
+                    if self.processed_inputs.contains(&dedup_key) {
                         skipped += 1;
                         continue;
                     }
 
-                    // Create output path
-                    let output_path = self.create_output_path(&video_path);
-
-                    // Create job
-                    let job = ConversionJob::new(video_path, output_path);
-                    self.processed_paths.insert(canonical);
+                    let output_path = self.create_output_path(&input);
+                    let job = ConversionJob::new(input, output_path);
+                    self.processed_inputs.insert(dedup_key);
                     self.jobs.push(job);
                     added += 1;
                 }
@@ -356,6 +440,32 @@ impl App {
                 } else if skipped > 0 {
                     self.set_message(format!("{} video(s) already in queue", skipped), true);
                 }
+                return;
+            }
+            Err(_) => {
+                // No files, try URL
+            }
+        }
+
+        // Try URL from clipboard text
+        match get_url_from_clipboard() {
+            Ok(Some(url)) => {
+                let input = InputSource::RemoteUrl(url.clone());
+                let dedup_key = input.dedup_key();
+
+                if self.processed_inputs.contains(&dedup_key) {
+                    self.set_message("URL already in queue".to_string(), true);
+                    return;
+                }
+
+                let output_path = self.create_output_path(&input);
+                let job = ConversionJob::new(input, output_path);
+                self.processed_inputs.insert(dedup_key);
+                self.jobs.push(job);
+                self.set_message("Added URL to queue".to_string(), false);
+            }
+            Ok(None) => {
+                self.set_message("No video file or URL in clipboard".to_string(), true);
             }
             Err(e) => {
                 self.set_message(format!("Clipboard: {}", e), true);
@@ -363,11 +473,15 @@ impl App {
         }
     }
 
-    fn create_output_path(&self, input_path: &std::path::Path) -> PathBuf {
-        let stem = input_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("output");
+    fn create_output_path(&self, input: &InputSource) -> PathBuf {
+        let stem = input.file_stem().unwrap_or_else(|| {
+            // Fallback: generate timestamp-based name
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format!("video-{}", ts)
+        });
 
         let mut output = self.settings.output_dir.join(format!("{}.gif", stem));
 
@@ -411,12 +525,9 @@ impl App {
             // Cancel if running
             job.cancel();
 
-            // Remove from processed paths
-            let canonical = job
-                .input_path
-                .canonicalize()
-                .unwrap_or_else(|_| job.input_path.clone());
-            self.processed_paths.remove(&canonical);
+            // Remove from processed inputs
+            let dedup_key = job.input.dedup_key();
+            self.processed_inputs.remove(&dedup_key);
         }
 
         // Remove job
@@ -457,7 +568,7 @@ impl App {
                 // Spawn conversion worker
                 let cancel_tx = spawn_conversion(
                     job.id,
-                    job.input_path.clone(),
+                    job.input.clone(),
                     job.output_path.clone(),
                     self.settings.clone(),
                     self.progress_tx.clone(),

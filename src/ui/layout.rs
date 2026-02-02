@@ -58,38 +58,61 @@ impl Widget for HelpBar<'_> {
         block.render(area, buf);
 
         let key_style = Style::default().fg(Color::Cyan);
-        let sep_style = Style::default().fg(Color::DarkGray);
         let desc_style = Style::default().fg(Color::Gray);
 
-        let bindings = [
-            ("p", "Paste"),
-            ("y", "Copy"),
-            ("x", "Del"),
-            ("Tab", "Switch"),
-            ("jk", "Nav"),
-            ("hl", "Set"),
-            ("q", "Quit"),
-        ];
-
         let mut spans: Vec<Span> = Vec::new();
-        for (i, (key, desc)) in bindings.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::styled(" | ", sep_style));
-            }
-            spans.push(Span::styled(*key, key_style));
-            spans.push(Span::styled(":", sep_style));
-            spans.push(Span::styled(*desc, desc_style));
-        }
 
-        // Show message if there is one
-        if let Some(msg) = &self.app.message {
-            spans.clear();
+        // Show rename input if editing
+        if self.app.editing_rename {
+            spans.push(Span::styled("Rename: ", desc_style));
+            spans.push(Span::styled(self.app.rename_input.clone(), key_style));
+            spans.push(Span::styled(".gif  ", desc_style));
+            spans.push(Span::styled("(enter)", key_style));
+            spans.push(Span::styled(" save ", desc_style));
+            spans.push(Span::styled("(esc)", key_style));
+            spans.push(Span::styled(" cancel", desc_style));
+        } else if let Some(msg) = &self.app.message {
+            // Show message if there is one
             let msg_style = if self.app.message_is_error {
                 Style::default().fg(Color::Red)
             } else {
                 Style::default().fg(Color::Green)
             };
             spans.push(Span::styled(msg.clone(), msg_style));
+        } else if !self.app.jobs.is_empty() {
+            // Show selected job's full path
+            if let Some(job) = self.app.jobs.get(self.app.selected_job_index) {
+                let input_display = job.input.ffmpeg_input();
+                let output_display = job.output_path.display().to_string();
+                let path_info = format!("{} -> {}", input_display, output_display);
+
+                // Truncate if too wide, with scroll offset
+                let max_width = inner.width.saturating_sub(2) as usize;
+                let display = if path_info.len() > max_width {
+                    let offset = (self.app.scroll_offset as usize) % path_info.len();
+                    let padded = format!("{}   {}", path_info, path_info);
+                    padded[offset..].chars().take(max_width).collect::<String>()
+                } else {
+                    path_info
+                };
+                spans.push(Span::styled(display, desc_style));
+            }
+        } else {
+            // Show keybindings when no jobs
+            // Format: (p)aste (y) copy (x) del (r)ename (tab) switch (j/k) nav (q)uit
+            let help = vec![
+                ("(p)", "aste  "),
+                ("(y)", " copy  "),
+                ("(x)", " del  "),
+                ("(r)", "ename  "),
+                ("(tab)", " switch  "),
+                ("(j/k)", " nav  "),
+                ("(q)", "uit"),
+            ];
+            for (key, desc) in help {
+                spans.push(Span::styled(key, key_style));
+                spans.push(Span::styled(desc, desc_style));
+            }
         }
 
         let line = Line::from(spans);

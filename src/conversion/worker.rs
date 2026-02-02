@@ -1,6 +1,6 @@
 use crate::config::Settings;
 use crate::conversion::ffmpeg::{build_filter_chain, get_loop_arg};
-use crate::conversion::job::{ConversionProgress, JobStatus, ProgressUpdate};
+use crate::conversion::job::{ConversionProgress, InputSource, JobStatus, ProgressUpdate};
 use anyhow::Result;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ use uuid::Uuid;
 /// Returns a cancellation sender that can be used to cancel the job
 pub fn spawn_conversion(
     job_id: Uuid,
-    input_path: PathBuf,
+    input: InputSource,
     output_path: PathBuf,
     settings: Settings,
     progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
@@ -22,15 +22,7 @@ pub fn spawn_conversion(
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
 
     tokio::spawn(async move {
-        run_conversion(
-            job_id,
-            input_path,
-            output_path,
-            settings,
-            progress_tx,
-            cancel_rx,
-        )
-        .await;
+        run_conversion(job_id, input, output_path, settings, progress_tx, cancel_rx).await;
     });
 
     cancel_tx
@@ -38,7 +30,7 @@ pub fn spawn_conversion(
 
 async fn run_conversion(
     job_id: Uuid,
-    input_path: PathBuf,
+    input: InputSource,
     output_path: PathBuf,
     settings: Settings,
     progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
@@ -67,11 +59,10 @@ async fn run_conversion(
 
     // Run FFmpeg in a blocking task
     let output_path_clone = output_path.clone();
-    let input_path_clone = input_path.clone();
     let result = tokio::task::spawn_blocking(move || {
         run_ffmpeg_blocking(
             job_id,
-            input_path_clone,
+            input,
             output_path_clone,
             filter_chain,
             loop_arg,
@@ -97,21 +88,23 @@ async fn run_conversion(
 #[allow(clippy::too_many_arguments)]
 fn run_ffmpeg_blocking(
     job_id: Uuid,
-    input_path: PathBuf,
+    input: InputSource,
     output_path: PathBuf,
     filter_chain: String,
     loop_arg: String,
     progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
     cancelled: Arc<AtomicBool>,
 ) -> Result<()> {
-    // First, get the duration using ffprobe
-    let duration_secs = get_video_duration(&input_path);
+    let input_arg = input.ffmpeg_input();
 
-    // Get ffmpeg path from ffmpeg-sidecar or system
-    let ffmpeg_path = ffmpeg_sidecar::paths::ffmpeg_path();
+    // First, get the duration using ffprobe
+    let duration_secs = get_video_duration(&input_arg);
+
+    // Get ffmpeg path (prefer system for better protocol support)
+    let ffmpeg_path = get_ffmpeg_path();
 
     let mut child = Command::new(&ffmpeg_path)
-        .args(["-i", input_path.to_string_lossy().as_ref()])
+        .args(["-i", &input_arg])
         .args(["-filter_complex", &filter_chain])
         .args(["-loop", &loop_arg])
         .args(["-progress", "pipe:1"]) // Send progress to stdout
@@ -120,11 +113,20 @@ fn run_ffmpeg_blocking(
         .arg(output_path.to_string_lossy().as_ref())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()?;
 
     let stdout = child.stdout.take().expect("Failed to capture stdout");
+    let stderr = child.stderr.take().expect("Failed to capture stderr");
     let reader = BufReader::new(stdout);
+
+    // Spawn thread to collect stderr
+    let stderr_handle = std::thread::spawn(move || {
+        let mut stderr_output = String::new();
+        let mut reader = BufReader::new(stderr);
+        let _ = std::io::Read::read_to_string(&mut reader, &mut stderr_output);
+        stderr_output
+    });
 
     let mut current_frame: u64 = 0;
 
@@ -202,6 +204,7 @@ fn run_ffmpeg_blocking(
 
     // Wait for process to finish
     let status = child.wait()?;
+    let stderr_output = stderr_handle.join().unwrap_or_default();
 
     // Check final result
     if status.success() && output_path.exists() {
@@ -218,12 +221,16 @@ fn run_ffmpeg_blocking(
             }),
         });
     } else {
+        // Extract last meaningful line from stderr
+        let error_msg = stderr_output
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty() && !l.starts_with(' '))
+            .unwrap_or("Unknown error")
+            .to_string();
         let _ = progress_tx.send(ProgressUpdate {
             job_id,
-            status: Some(JobStatus::Failed(format!(
-                "FFmpeg exited with status: {}",
-                status
-            ))),
+            status: Some(JobStatus::Failed(error_msg)),
             progress: None,
         });
     }
@@ -231,17 +238,20 @@ fn run_ffmpeg_blocking(
     Ok(())
 }
 
-/// Get video duration using ffprobe
-fn get_video_duration(path: &PathBuf) -> Option<f64> {
-    let ffprobe_path = ffmpeg_sidecar::ffprobe::ffprobe_path();
+/// Get video duration using ffprobe (works with local files and URLs)
+fn get_video_duration(input: &str) -> Option<f64> {
+    let ffprobe_path = get_ffprobe_path();
 
     let output = Command::new(&ffprobe_path)
         .args([
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
         ])
-        .arg(path.to_string_lossy().as_ref())
+        .arg(input)
         .output()
         .ok()?;
 
@@ -249,8 +259,46 @@ fn get_video_duration(path: &PathBuf) -> Option<f64> {
     duration_str.trim().parse::<f64>().ok()
 }
 
+/// Get FFmpeg path, preferring system installation for better codec/protocol support
+fn get_ffmpeg_path() -> std::path::PathBuf {
+    // Check for system ffmpeg first (has better protocol support)
+    if let Ok(output) = Command::new("which").arg("ffmpeg").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return std::path::PathBuf::from(path);
+            }
+        }
+    }
+    // Fall back to sidecar
+    ffmpeg_sidecar::paths::ffmpeg_path()
+}
+
+/// Get FFprobe path, preferring system installation
+fn get_ffprobe_path() -> std::path::PathBuf {
+    if let Ok(output) = Command::new("which").arg("ffprobe").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return std::path::PathBuf::from(path);
+            }
+        }
+    }
+    ffmpeg_sidecar::ffprobe::ffprobe_path()
+}
+
 /// Check if ffmpeg is available
 pub fn check_ffmpeg() -> Result<()> {
-    ffmpeg_sidecar::download::auto_download()
-        .map_err(|e| anyhow::anyhow!("Failed to ensure FFmpeg is available: {}", e))
+    // Prefer system ffmpeg - check if it exists and works
+    let ffmpeg_path = get_ffmpeg_path();
+    let output = Command::new(&ffmpeg_path)
+        .arg("-version")
+        .output()
+        .map_err(|e| anyhow::anyhow!("FFmpeg not found: {}", e))?;
+
+    if !output.status.success() {
+        return Err(anyhow::anyhow!("FFmpeg check failed"));
+    }
+
+    Ok(())
 }
