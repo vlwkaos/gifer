@@ -31,3 +31,5 @@ ffprobe/
 *secret*
 *credential*
 *.asc
+gifer-0.2.0-darwin-arm64.tar.gz.asc
+gifer-0.2.1-darwin-arm64.tar.gz.asc
