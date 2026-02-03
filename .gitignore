@@ -1,6 +1,8 @@
 # Build artifacts
 knowledge
 /target/
+*.tar.gz
+/gifer
 
 # Cargo.lock is typically committed for binaries, but ignore if you prefer
 # Cargo.lock
@@ -29,4 +31,3 @@ ffprobe/
 *secret*
 *credential*
 *.asc
-gifer-0.2.0-darwin-arm64.tar.gz.asc
