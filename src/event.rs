@@ -12,6 +12,8 @@ pub enum AppEvent {
     Key(KeyEvent),
     /// Terminal resize event
     Resize(u16, u16),
+    /// Terminal paste event (text pasted with Cmd+V)
+    Paste(String),
     /// Periodic tick for UI refresh
     Tick,
 }
@@ -44,6 +46,7 @@ impl EventHandler {
                         match event {
                             Event::Key(key) => return Ok(AppEvent::Key(key)),
                             Event::Resize(w, h) => return Ok(AppEvent::Resize(w, h)),
+                            Event::Paste(text) => return Ok(AppEvent::Paste(text)),
                             _ => {}
                         }
                     }

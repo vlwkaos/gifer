@@ -64,8 +64,8 @@ impl<'a> JobListPanel<'a> {
                 }
             }
             JobStatus::Failed(err) => {
-                let short_err = if err.len() > 30 {
-                    format!("{}...", &err[..27])
+                let short_err = if err.chars().count() > 30 {
+                    format!("{}...", err.chars().take(27).collect::<String>())
                 } else {
                     err.clone()
                 };
@@ -79,8 +79,8 @@ impl<'a> JobListPanel<'a> {
 
         // Truncate path if needed to fit status
         let path_max = available_width.saturating_sub(status_part.len() + 4);
-        let path_display = if path_part.len() > path_max && path_max > 3 {
-            format!("{}...", &path_part[..path_max - 3])
+        let path_display = if path_part.chars().count() > path_max && path_max > 3 {
+            format!("{}...", path_part.chars().take(path_max - 3).collect::<String>())
         } else {
             path_part
         };
@@ -158,5 +158,29 @@ impl Widget for JobListPanel<'_> {
 
         let list = List::new(items);
         list.render(inner, buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_unicode_truncation() {
+        // Test that truncation handles Unicode characters properly
+        // macOS uses narrow no-break space (U+202F) in screen recording filenames
+        let path = "Screen\u{202f}Recording 2026-02-02 at 7.27.31\u{202f}PM.mov";
+
+        // Truncate using char-based slicing (safe)
+        let truncated: String = path.chars().take(27).collect();
+        assert!(truncated.chars().count() <= 27);
+
+        // URL with emoji
+        let url = "https://example.com/video_🎥_test.mp4";
+        let truncated_url: String = url.chars().take(37).collect();
+        assert!(truncated_url.chars().count() <= 37);
+
+        // Error message with Unicode
+        let err = "Failed to process: 文件名.mp4 (file not found)";
+        let truncated_err: String = err.chars().take(27).collect();
+        assert!(truncated_err.chars().count() <= 27);
     }
 }

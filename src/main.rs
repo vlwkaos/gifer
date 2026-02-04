@@ -9,6 +9,7 @@ use anyhow::Result;
 use app::App;
 use config::Settings;
 use crossterm::{
+    event::{DisableBracketedPaste, EnableBracketedPaste},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -21,7 +22,7 @@ use std::time::Duration;
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -30,7 +31,7 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
 /// Restore terminal to original state
 fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableBracketedPaste)?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -89,6 +90,11 @@ async fn run_app(
                 match event? {
                     AppEvent::Key(key) => {
                         app.handle_key(key);
+                    }
+                    AppEvent::Paste(_text) => {
+                        // Terminal paste detected (Cmd+V)
+                        // Ignore the pasted text and read files from clipboard instead
+                        app.paste_from_clipboard();
                     }
                     AppEvent::Tick => {
                         app.tick();

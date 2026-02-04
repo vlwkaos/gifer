@@ -30,8 +30,8 @@ impl InputSource {
                     }
                 }
                 // Fallback: truncate URL
-                if url.len() > 40 {
-                    format!("{}...", &url[..37])
+                if url.chars().count() > 40 {
+                    format!("{}...", url.chars().take(37).collect::<String>())
                 } else {
                     url.clone()
                 }

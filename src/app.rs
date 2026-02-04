@@ -335,7 +335,7 @@ impl App {
                     .min(common_len);
             }
             if common_len > input_str.len() {
-                self.output_input = crate::config::collapse_tilde(&first[..common_len]);
+                self.output_input = crate::config::collapse_tilde(&first.chars().take(common_len).collect::<String>());
             }
         }
     }
@@ -407,7 +407,7 @@ impl App {
         }
     }
 
-    fn paste_from_clipboard(&mut self) {
+    pub fn paste_from_clipboard(&mut self) {
         // Try file paths first (existing behavior)
         match get_videos_from_clipboard() {
             Ok(videos) => {
