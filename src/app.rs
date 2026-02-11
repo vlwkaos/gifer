@@ -1,4 +1,7 @@
-use crate::clipboard::{copy_file_to_clipboard, get_url_from_clipboard, get_videos_from_clipboard};
+use crate::clipboard::{
+    copy_file_to_clipboard, copy_files_to_clipboard, get_url_from_clipboard,
+    get_videos_from_clipboard,
+};
 use crate::config::{expand_tilde, Settings};
 use crate::conversion::{spawn_conversion, ConversionJob, InputSource, JobStatus, ProgressUpdate};
 use crate::event::{is_down_key, is_left_key, is_paste_key, is_quit_key, is_right_key, is_up_key};
@@ -22,6 +25,7 @@ pub enum SettingsField {
     Fps,
     Quality,
     Loop,
+    SizeLimit,
     OutputDir,
 }
 
@@ -31,7 +35,8 @@ impl SettingsField {
             SettingsField::Scale => SettingsField::Fps,
             SettingsField::Fps => SettingsField::Quality,
             SettingsField::Quality => SettingsField::Loop,
-            SettingsField::Loop => SettingsField::OutputDir,
+            SettingsField::Loop => SettingsField::SizeLimit,
+            SettingsField::SizeLimit => SettingsField::OutputDir,
             SettingsField::OutputDir => SettingsField::Scale,
         }
     }
@@ -42,7 +47,8 @@ impl SettingsField {
             SettingsField::Fps => SettingsField::Scale,
             SettingsField::Quality => SettingsField::Fps,
             SettingsField::Loop => SettingsField::Quality,
-            SettingsField::OutputDir => SettingsField::Loop,
+            SettingsField::SizeLimit => SettingsField::Loop,
+            SettingsField::OutputDir => SettingsField::SizeLimit,
         }
     }
 }
@@ -222,7 +228,10 @@ impl App {
         if let Some(job) = self.jobs.get(self.selected_job_index) {
             // Allow rename for pending and completed jobs
             if !matches!(job.status, JobStatus::Pending | JobStatus::Complete) {
-                self.set_message("Can only rename pending or completed jobs".to_string(), true);
+                self.set_message(
+                    "Can only rename pending or completed jobs".to_string(),
+                    true,
+                );
                 return;
             }
 
@@ -248,18 +257,31 @@ impl App {
                 }
 
                 if let Some(job) = self.jobs.get_mut(self.selected_job_index) {
-                    let new_path = self.settings.output_dir.join(format!("{}.gif", new_name));
-
-                    // For completed jobs, rename the actual file on disk
+                    // For completed jobs, rename the actual file(s) on disk
                     if job.status == JobStatus::Complete {
-                        if let Err(e) = std::fs::rename(&job.output_path, &new_path) {
-                            self.set_message(format!("Rename failed: {}", e), true);
-                            self.editing_rename = false;
-                            return;
+                        let old_paths = job.actual_output_paths();
+                        let split_count = job.progress.split_count;
+
+                        // Rename all files (handles both single and split)
+                        for (i, old_path) in old_paths.iter().enumerate() {
+                            let new_path = if split_count.is_some() && split_count != Some(1) {
+                                self.settings
+                                    .output_dir
+                                    .join(format!("{}_{}.gif", new_name, i + 1))
+                            } else {
+                                self.settings.output_dir.join(format!("{}.gif", new_name))
+                            };
+
+                            if let Err(e) = std::fs::rename(old_path, &new_path) {
+                                self.set_message(format!("Rename failed: {}", e), true);
+                                self.editing_rename = false;
+                                return;
+                            }
                         }
                     }
 
-                    job.output_path = new_path;
+                    // Update the base output path (used for generating actual paths)
+                    job.output_path = self.settings.output_dir.join(format!("{}.gif", new_name));
                 }
 
                 self.editing_rename = false;
@@ -335,7 +357,9 @@ impl App {
                     .min(common_len);
             }
             if common_len > input_str.len() {
-                self.output_input = crate::config::collapse_tilde(&first.chars().take(common_len).collect::<String>());
+                self.output_input = crate::config::collapse_tilde(
+                    &first.chars().take(common_len).collect::<String>(),
+                );
             }
         }
     }
@@ -394,6 +418,13 @@ impl App {
                     self.settings.loop_count.next()
                 } else {
                     self.settings.loop_count.prev()
+                };
+            }
+            SettingsField::SizeLimit => {
+                self.settings.size_limit = if increment {
+                    self.settings.size_limit.next()
+                } else {
+                    self.settings.size_limit.prev()
                 };
             }
             SettingsField::OutputDir => {
@@ -501,9 +532,22 @@ impl App {
     fn copy_selected_output(&mut self) {
         if let Some(job) = self.jobs.get(self.selected_job_index) {
             if job.status == JobStatus::Complete {
-                match copy_file_to_clipboard(&job.output_path) {
+                let paths = job.actual_output_paths();
+                let count = paths.len();
+
+                let result = if count == 1 {
+                    copy_file_to_clipboard(&paths[0])
+                } else {
+                    copy_files_to_clipboard(&paths)
+                };
+
+                match result {
                     Ok(()) => {
-                        self.set_message(format!("Copied: {}", job.output_filename()), false);
+                        if count == 1 {
+                            self.set_message(format!("Copied: {}", job.output_filename()), false);
+                        } else {
+                            self.set_message(format!("Copied {} files", count), false);
+                        }
                     }
                     Err(e) => {
                         self.set_message(format!("Copy failed: {}", e), true);

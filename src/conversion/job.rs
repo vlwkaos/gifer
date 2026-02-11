@@ -84,6 +84,8 @@ pub enum JobStatus {
     Pending,
     /// Currently being converted
     Converting,
+    /// Splitting into multiple parts (after initial conversion)
+    Splitting(usize),
     /// Successfully completed
     Complete,
     /// Failed with error message
@@ -98,6 +100,7 @@ impl JobStatus {
         match self {
             JobStatus::Pending => "○",
             JobStatus::Converting => "▶",
+            JobStatus::Splitting(_) => "✂",
             JobStatus::Complete => "✓",
             JobStatus::Failed(_) => "✗",
             JobStatus::Cancelled => "⊘",
@@ -114,7 +117,7 @@ impl JobStatus {
 
     /// Check if job is actively converting
     pub fn is_converting(&self) -> bool {
-        matches!(self, JobStatus::Converting)
+        matches!(self, JobStatus::Converting | JobStatus::Splitting(_))
     }
 }
 
@@ -132,6 +135,8 @@ pub struct ConversionProgress {
     pub speed: Option<String>,
     /// Output file size in bytes (when complete)
     pub output_size: Option<u64>,
+    /// Number of split parts (None = no split, Some(n) = split into n parts)
+    pub split_count: Option<usize>,
 }
 
 impl ConversionProgress {
@@ -204,6 +209,32 @@ impl ConversionJob {
     /// Format output size for display
     pub fn size_display(&self) -> Option<String> {
         self.progress.output_size.map(format_size)
+    }
+
+    /// Get display string for split status
+    pub fn split_display(&self) -> Option<String> {
+        self.progress.split_count.map(|n| format!("({} parts)", n))
+    }
+
+    /// Get the actual output paths (handles split files)
+    pub fn actual_output_paths(&self) -> Vec<PathBuf> {
+        match self.progress.split_count {
+            None | Some(1) => vec![self.output_path.clone()],
+            Some(n) => {
+                let stem = self
+                    .output_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("output");
+                let parent = self
+                    .output_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."));
+                (1..=n)
+                    .map(|i| parent.join(format!("{}_{}.gif", stem, i)))
+                    .collect()
+            }
+        }
     }
 
     /// Cancel the job if it's running

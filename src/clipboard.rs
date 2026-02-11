@@ -67,11 +67,19 @@ pub fn get_videos_from_clipboard() -> Result<Vec<PathBuf>> {
 
 /// Copy a file to the clipboard (so it can be pasted in Finder, etc.)
 pub fn copy_file_to_clipboard(path: &std::path::Path) -> Result<()> {
+    copy_files_to_clipboard(&[path.to_path_buf()])
+}
+
+/// Copy multiple files to the clipboard
+pub fn copy_files_to_clipboard(paths: &[PathBuf]) -> Result<()> {
     let ctx = ClipboardContext::new().map_err(|e| anyhow!("Failed to access clipboard: {}", e))?;
 
-    let path_str = path.to_string_lossy().to_string();
-    ctx.set_files(vec![path_str])
-        .map_err(|e| anyhow!("Failed to copy file to clipboard: {}", e))?;
+    let path_strs: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    ctx.set_files(path_strs)
+        .map_err(|e| anyhow!("Failed to copy files to clipboard: {}", e))?;
 
     Ok(())
 }

@@ -71,7 +71,11 @@ impl Widget for PathInfoBar<'_> {
             let display = if char_count > max_width {
                 let offset = (self.app.scroll_offset as usize) % char_count;
                 let padded = format!("{}   {}", path_info, path_info);
-                padded.chars().skip(offset).take(max_width).collect::<String>()
+                padded
+                    .chars()
+                    .skip(offset)
+                    .take(max_width)
+                    .collect::<String>()
             } else {
                 path_info
             };
@@ -142,9 +146,14 @@ impl Widget for HelpBar<'_> {
 
             // Version on the right
             let version = env!("CARGO_PKG_VERSION");
-            let padding = inner.width.saturating_sub(keys_len as u16 + version.len() as u16 + 3);
+            let padding = inner
+                .width
+                .saturating_sub(keys_len as u16 + version.len() as u16 + 3);
             spans.push(Span::raw(" ".repeat(padding as usize)));
-            spans.push(Span::styled(format!("v{}", version), Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                format!("v{}", version),
+                Style::default().fg(Color::DarkGray),
+            ));
         }
 
         let paragraph = Paragraph::new(Line::from(spans));

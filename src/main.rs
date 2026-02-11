@@ -31,7 +31,11 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
 /// Restore terminal to original state
 fn teardown_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableBracketedPaste)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableBracketedPaste
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }

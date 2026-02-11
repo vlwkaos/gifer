@@ -239,6 +239,60 @@ impl FpsPreset {
     }
 }
 
+/// Size limit presets for GIF output (triggers splitting if exceeded)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SizeLimit {
+    #[default]
+    None,
+    Mb5,
+    Mb10,
+    Mb25,
+    Mb50,
+}
+
+impl SizeLimit {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SizeLimit::None => "None",
+            SizeLimit::Mb5 => "5 MB",
+            SizeLimit::Mb10 => "10 MB",
+            SizeLimit::Mb25 => "25 MB",
+            SizeLimit::Mb50 => "50 MB",
+        }
+    }
+
+    /// Get the limit in bytes, or None if no limit
+    pub fn bytes(&self) -> Option<u64> {
+        match self {
+            SizeLimit::None => None,
+            SizeLimit::Mb5 => Some(5 * 1024 * 1024),
+            SizeLimit::Mb10 => Some(10 * 1024 * 1024),
+            SizeLimit::Mb25 => Some(25 * 1024 * 1024),
+            SizeLimit::Mb50 => Some(50 * 1024 * 1024),
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            SizeLimit::None => SizeLimit::Mb5,
+            SizeLimit::Mb5 => SizeLimit::Mb10,
+            SizeLimit::Mb10 => SizeLimit::Mb25,
+            SizeLimit::Mb25 => SizeLimit::Mb50,
+            SizeLimit::Mb50 => SizeLimit::None,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            SizeLimit::None => SizeLimit::Mb50,
+            SizeLimit::Mb5 => SizeLimit::None,
+            SizeLimit::Mb10 => SizeLimit::Mb5,
+            SizeLimit::Mb25 => SizeLimit::Mb10,
+            SizeLimit::Mb50 => SizeLimit::Mb25,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     /// Scale preset
@@ -249,6 +303,9 @@ pub struct Settings {
     pub quality: Quality,
     /// Loop behavior
     pub loop_count: LoopCount,
+    /// Size limit for GIF output (triggers splitting if exceeded)
+    #[serde(default)]
+    pub size_limit: SizeLimit,
     /// Output directory for GIFs
     pub output_dir: PathBuf,
     /// Maximum concurrent conversion jobs
@@ -262,6 +319,7 @@ impl Default for Settings {
             fps: FpsPreset::Fps10,
             quality: Quality::Medium,
             loop_count: LoopCount::Infinite,
+            size_limit: SizeLimit::None,
             output_dir: expand_tilde("~/gifs"),
             max_concurrent: 3,
         }

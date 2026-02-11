@@ -32,6 +32,7 @@ impl<'a> JobListPanel<'a> {
         match status {
             JobStatus::Pending => Style::default().fg(Color::DarkGray),
             JobStatus::Converting => Style::default().fg(Color::Yellow),
+            JobStatus::Splitting(_) => Style::default().fg(Color::Cyan),
             JobStatus::Complete => Style::default().fg(Color::Green),
             JobStatus::Failed(_) => Style::default().fg(Color::Red),
             JobStatus::Cancelled => Style::default().fg(Color::Magenta),
@@ -56,9 +57,17 @@ impl<'a> JobListPanel<'a> {
                 let bar = job.progress.progress_bar(10);
                 format!("{} {:.0}%", bar, job.progress.percentage)
             }
+            JobStatus::Splitting(parts) => {
+                let bar = job.progress.progress_bar(10);
+                format!("{} Splitting ({} parts)", bar, parts)
+            }
             JobStatus::Complete => {
-                if let Some(size) = job.size_display() {
-                    format!("[Complete] {}", size)
+                let size_str = job.size_display().unwrap_or_default();
+                let split_str = job.split_display().unwrap_or_default();
+                if !split_str.is_empty() {
+                    format!("[Complete] {} {}", size_str, split_str)
+                } else if !size_str.is_empty() {
+                    format!("[Complete] {}", size_str)
                 } else {
                     "[Complete]".to_string()
                 }
@@ -80,7 +89,10 @@ impl<'a> JobListPanel<'a> {
         // Truncate path if needed to fit status
         let path_max = available_width.saturating_sub(status_part.len() + 4);
         let path_display = if path_part.chars().count() > path_max && path_max > 3 {
-            format!("{}...", path_part.chars().take(path_max - 3).collect::<String>())
+            format!(
+                "{}...",
+                path_part.chars().take(path_max - 3).collect::<String>()
+            )
         } else {
             path_part
         };

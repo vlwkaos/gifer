@@ -66,6 +66,7 @@ async fn run_conversion(
             output_path_clone,
             filter_chain,
             loop_arg,
+            settings,
             progress_tx,
             cancelled,
         )
@@ -92,6 +93,7 @@ fn run_ffmpeg_blocking(
     output_path: PathBuf,
     filter_chain: String,
     loop_arg: String,
+    settings: Settings,
     progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
     cancelled: Arc<AtomicBool>,
 ) -> Result<()> {
@@ -175,26 +177,16 @@ fn run_ffmpeg_blocking(
                                 percentage,
                                 speed: None,
                                 output_size: None,
+                                split_count: None,
                             }),
                         });
                     }
                 }
                 "progress" => {
                     if value.trim() == "end" {
-                        // Conversion complete
-                        let output_size = std::fs::metadata(&output_path).map(|m| m.len()).ok();
-                        let _ = progress_tx.send(ProgressUpdate {
-                            job_id,
-                            status: Some(JobStatus::Complete),
-                            progress: Some(ConversionProgress {
-                                frame: current_frame,
-                                total_frames: None,
-                                percentage: 100.0,
-                                speed: None,
-                                output_size,
-                            }),
-                        });
-                        return Ok(());
+                        // Don't send complete here - let the post-processing handle it
+                        // This allows us to check file size and potentially split
+                        break;
                     }
                 }
                 _ => {}
@@ -209,6 +201,110 @@ fn run_ffmpeg_blocking(
     // Check final result
     if status.success() && output_path.exists() {
         let output_size = std::fs::metadata(&output_path).map(|m| m.len()).ok();
+
+        // Check if we need to split based on size limit
+        let size_limit = settings.size_limit.bytes();
+        if let (Some(limit), Some(size)) = (size_limit, output_size) {
+            if size > limit {
+                // Need to split - calculate number of parts
+                // Use 75% of limit as target to account for variable compression
+                let parts = ((size as f64) / (limit as f64 * 0.75)).ceil() as usize;
+                let duration = get_video_duration(&input.ffmpeg_input());
+
+                if let Some(dur) = duration {
+                    // Send splitting status
+                    let _ = progress_tx.send(ProgressUpdate {
+                        job_id,
+                        status: Some(JobStatus::Splitting(parts)),
+                        progress: None,
+                    });
+
+                    // Delete the oversized file
+                    let _ = std::fs::remove_file(&output_path);
+
+                    // Convert in segments
+                    let segment_duration = dur / (parts as f64);
+                    let stem = output_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("output");
+                    let parent = output_path.parent().unwrap_or(std::path::Path::new("."));
+
+                    let mut total_size: u64 = 0;
+                    for i in 0..parts {
+                        if cancelled.load(Ordering::SeqCst) {
+                            let _ = progress_tx.send(ProgressUpdate {
+                                job_id,
+                                status: Some(JobStatus::Cancelled),
+                                progress: None,
+                            });
+                            return Ok(());
+                        }
+
+                        let start_time = i as f64 * segment_duration;
+                        let part_output = parent.join(format!("{}_{}.gif", stem, i + 1));
+
+                        let result = run_ffmpeg_segment(
+                            &input,
+                            &part_output,
+                            &filter_chain,
+                            &loop_arg,
+                            start_time,
+                            segment_duration,
+                            &ffmpeg_path,
+                        );
+
+                        if let Err(e) = result {
+                            let _ = progress_tx.send(ProgressUpdate {
+                                job_id,
+                                status: Some(JobStatus::Failed(format!(
+                                    "Split part {} failed: {}",
+                                    i + 1,
+                                    e
+                                ))),
+                                progress: None,
+                            });
+                            return Ok(());
+                        }
+
+                        if let Ok(meta) = std::fs::metadata(&part_output) {
+                            total_size += meta.len();
+                        }
+
+                        // Report progress for splitting
+                        let _ = progress_tx.send(ProgressUpdate {
+                            job_id,
+                            status: None,
+                            progress: Some(ConversionProgress {
+                                frame: 0,
+                                total_frames: None,
+                                percentage: ((i + 1) as f32 / parts as f32) * 100.0,
+                                speed: None,
+                                output_size: Some(total_size),
+                                split_count: Some(parts),
+                            }),
+                        });
+                    }
+
+                    // Complete with split info
+                    let _ = progress_tx.send(ProgressUpdate {
+                        job_id,
+                        status: Some(JobStatus::Complete),
+                        progress: Some(ConversionProgress {
+                            frame: current_frame,
+                            total_frames: None,
+                            percentage: 100.0,
+                            speed: None,
+                            output_size: Some(total_size),
+                            split_count: Some(parts),
+                        }),
+                    });
+                    return Ok(());
+                }
+            }
+        }
+
+        // No split needed
         let _ = progress_tx.send(ProgressUpdate {
             job_id,
             status: Some(JobStatus::Complete),
@@ -218,6 +314,7 @@ fn run_ffmpeg_blocking(
                 percentage: 100.0,
                 speed: None,
                 output_size,
+                split_count: None,
             }),
         });
     } else {
@@ -233,6 +330,44 @@ fn run_ffmpeg_blocking(
             status: Some(JobStatus::Failed(error_msg)),
             progress: None,
         });
+    }
+
+    Ok(())
+}
+
+/// Run FFmpeg for a specific time segment
+fn run_ffmpeg_segment(
+    input: &InputSource,
+    output_path: &std::path::Path,
+    filter_chain: &str,
+    loop_arg: &str,
+    start_time: f64,
+    duration: f64,
+    ffmpeg_path: &std::path::Path,
+) -> Result<()> {
+    let input_arg = input.ffmpeg_input();
+
+    let output = Command::new(ffmpeg_path)
+        .args(["-ss", &format!("{:.3}", start_time)])
+        .args(["-t", &format!("{:.3}", duration)])
+        .args(["-i", &input_arg])
+        .args(["-filter_complex", filter_chain])
+        .args(["-loop", loop_arg])
+        .args(["-y"])
+        .arg(output_path.to_string_lossy().as_ref())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let error_msg = stderr
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty() && !l.starts_with(' '))
+            .unwrap_or("Unknown error");
+        return Err(anyhow::anyhow!("{}", error_msg));
     }
 
     Ok(())

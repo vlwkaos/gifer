@@ -83,6 +83,11 @@ impl Widget for SettingsPanel<'_> {
             &self.app.settings.loop_count.as_str(),
             SettingsField::Loop,
         ));
+        row1_spans.extend(self.render_field(
+            "Split",
+            self.app.settings.size_limit.as_str(),
+            SettingsField::SizeLimit,
+        ));
 
         // Output directory - show text input if editing
         let output_value = if self.app.editing_output {
